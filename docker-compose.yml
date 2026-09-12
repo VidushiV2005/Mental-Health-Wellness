@@ -1,0 +1,19 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: wellness
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-wellness}
+      POSTGRES_DB: wellness
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - wellness-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wellness"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+volumes:
+  wellness-data:
