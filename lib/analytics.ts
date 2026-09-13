@@ -1,7 +1,9 @@
 import type { Analysis, Day, Entry, Metric, Theme } from "./types";
 import { cosine, lexicalEmbedding, words } from "./embeddings";
-export const mean = (xs: number[]) =>
-  xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0;
+export const mean = (values: (number | null | undefined)[]) => {
+  const xs = values.filter((v): v is number => typeof v === "number");
+  return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0;
+};
 export const sd = (xs: number[]) =>
   xs.length < 2
     ? 0
@@ -28,7 +30,9 @@ const metrics: Metric[] = ["valence", "stress", "energy", "clarity"];
 const allMetrics = [...metrics, "sleep", "workload", "activity"] as const;
 export function aggregate(entries: Entry[]): Day[] {
   const groups = new Map<string, Entry[]>();
-  for (const entry of entries)
+  for (const entry of entries.filter((e) =>
+    allMetrics.every((k) => typeof e[k] === "number"),
+  ))
     groups.set(entry.date, [...(groups.get(entry.date) || []), entry]);
   return [...groups]
     .sort(([a], [b]) => a.localeCompare(b))

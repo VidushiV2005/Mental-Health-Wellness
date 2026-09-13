@@ -12,10 +12,22 @@ import {
 } from "@/lib/auth";
 import { entrySchema, authSchema } from "@/lib/validation";
 import { demoEntries } from "@/lib/demo";
-import { analyze } from "@/lib/analytics";
-import { embed } from "@/lib/embeddings";
-import { explain } from "@/lib/openrouter";
-import type { Entry, Report } from "@/lib/types";
+
+import type { Entry } from "@/lib/types";
+
+import {
+  preferences,
+  preferenceSchema,
+  updatePreferences,
+  mutateEntry,
+  enqueue,
+  overview,
+  jobs,
+  retryJob,
+} from "@/lib/journal/store";
+import { localDate, shift } from "@/lib/journal/scheduler";
+import { CONSENT } from "@/lib/journal/schema";
+import { z } from "zod";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -37,10 +49,10 @@ const json = (body: unknown, status = 200, headers = {}) =>
     headers: { "Cache-Control": "no-store", ...headers },
   });
 async function body(req: Request) {
-  if (Number(req.headers.get("content-length") || 0) > 24000)
+  if (Number(req.headers.get("content-length") || 0) > 260000)
     throw new Error("BODY_TOO_LARGE");
   const text = await req.text();
-  if (text.length > 24000) throw new Error("BODY_TOO_LARGE");
+  if (text.length > 260000) throw new Error("BODY_TOO_LARGE");
   return JSON.parse(text || "{}");
 }
 async function getEntries(userId: string): Promise<Entry[]> {
@@ -150,10 +162,17 @@ async function handler(
     if (route === "me" && method === "GET")
       return json({
         user,
-        aiConfigured: Boolean(process.env.OPENROUTER_API_KEY),
-        model: process.env.OPENROUTER_MODEL || "openrouter/free",
+        aiConfigured: Boolean(
+          process.env.OPENROUTER_API_KEY?.trim() ||
+          process.env.GEMINI_API_KEY?.trim(),
+        ),
+        model: process.env.OPENROUTER_API_KEY?.trim()
+          ? process.env.OPENROUTER_MODEL || "openrouter/free"
+          : process.env.GEMINI_MODEL || "gemini-3.6-flash",
         database: (await database()).dialect,
         embeddingMode: process.env.EMBEDDING_MODE || "lexical",
+        preferences: await preferences(user.id),
+        consentVersion: CONSENT,
       });
     if (route === "entries" && method === "GET")
       return json({
@@ -168,15 +187,12 @@ async function handler(
           429,
         );
       const input = entrySchema.parse(await body(req));
-      const vector = await embed(input.narrative);
       const entry: Entry = {
         ...input,
         id: randomUUID(),
         createdAt: new Date().toISOString(),
-        embedding: vector.vector,
-        embeddingMethod: vector.method,
       };
-      await saveEntry(user.id, entry);
+      await mutateEntry(user.id, entry, null);
       return json({ entry: { ...entry, embedding: undefined } }, 201);
     }
     if (path[0] === "entries" && path.length === 2) {
@@ -188,49 +204,112 @@ async function handler(
       )[0];
       if (!existing) return json({ error: "Entry not found." }, 404);
       if (method === "DELETE") {
-        await query("DELETE FROM entries WHERE id = ? AND user_id = ?", [
-          path[1],
-          user.id,
-        ]);
+        await mutateEntry(user.id, null, JSON.parse(String(existing.data)));
         return json({ ok: true });
       }
       if (method === "PATCH") {
         const input = entrySchema.parse(await body(req));
         const old = JSON.parse(String(existing.data));
-        const vector = await embed(input.narrative);
-        const entry = {
-          ...old,
-          ...input,
-          embedding: vector.vector,
-          embeddingMethod: vector.method,
-        };
-        await query(
-          "UPDATE entries SET date = ?, data = ?, embedding = ? WHERE id = ? AND user_id = ?",
-          [
-            entry.date,
-            JSON.stringify(entry),
-            JSON.stringify(entry.embedding),
-            path[1],
-            user.id,
-          ],
-        );
+        const { embedding, embeddingMethod, ...preserved } = old;
+        const entry = { ...preserved, ...input };
+        await mutateEntry(user.id, entry, old);
         return json({ entry: { ...entry, embedding: undefined } });
       }
     }
-    if (route === "analytics" && method === "GET") {
-      const days = Math.min(
-        365,
-        Math.max(7, Number(req.nextUrl.searchParams.get("days")) || 30),
-      );
-      const from = new Date(Date.now() - (days - 1) * 86400000)
-        .toISOString()
-        .slice(0, 10);
+    if (route === "preferences" && method === "PATCH")
       return json({
-        analysis: analyze(
-          (await getEntries(user.id)).filter((e) => e.date >= from),
+        preferences: await updatePreferences(
+          user.id,
+          preferenceSchema.parse(await body(req)),
         ),
       });
+    if (route === "preferences" && method === "GET")
+      return json({
+        preferences: await preferences(user.id),
+        consentVersion: CONSENT,
+      });
+    if (route === "companion")
+      return json(
+        {
+          error:
+            "Companion has been retired. Historical messages remain in your data export.",
+        },
+        410,
+      );
+    const range = async (input: Record<string, unknown> = {}) => {
+      const pref = await preferences(user.id);
+      const end = String(
+        input.end ||
+          req.nextUrl.searchParams.get("end") ||
+          localDate(pref.timezone),
+      );
+      const days = Number(
+        input.days || req.nextUrl.searchParams.get("days") || 30,
+      );
+      const start = String(
+        input.start ||
+          req.nextUrl.searchParams.get("start") ||
+          shift(end, -Math.min(365, Math.max(7, days)) + 1),
+      );
+      const date = z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .refine(
+          (s) =>
+            !Number.isNaN(Date.parse(s)) &&
+            new Date(s).toISOString().slice(0, 10) === s,
+        );
+      date.parse(start);
+      date.parse(end);
+      if (
+        start > end ||
+        start < "2000-01-01" ||
+        end > localDate(pref.timezone) ||
+        Date.parse(end) - Date.parse(start) > 364 * 86400000
+      )
+        throw new Error("INVALID_RANGE");
+      return { start, end };
+    };
+    if (route === "analytics" && method === "GET") {
+      const { start, end } = await range();
+      return json(await overview(user.id, start, end));
     }
+    if (
+      (route === "analysis" && method === "POST") ||
+      (route === "reports" && method === "POST")
+    ) {
+      const { start, end } = await range(await body(req));
+      if (!limit(`analysis:${user.id}`, 10))
+        return json(
+          { error: "Please wait before requesting another analysis." },
+          429,
+        );
+      const job = await (
+        await database()
+      ).transaction((q) =>
+        enqueue(
+          user.id,
+          route === "reports" ? "report" : "overview",
+          start,
+          end,
+          undefined,
+          q,
+        ),
+      );
+      return json(
+        { job, status: job ? "queued" : "insufficient" },
+        job ? 202 : 200,
+      );
+    }
+    if (route === "jobs" && method === "GET")
+      return json({ jobs: await jobs(user.id) });
+    if (
+      path[0] === "jobs" &&
+      path.length === 3 &&
+      path[2] === "retry" &&
+      method === "POST"
+    )
+      return json({ job: await retryJob(user.id, path[1]) }, 202);
     if (route === "reports" && method === "GET")
       return json({
         reports: (
@@ -240,80 +319,27 @@ async function handler(
           )
         ).map((r) => JSON.parse(String(r.data))),
       });
-    if (route === "reports" && method === "POST") {
-      const entries = await getEntries(user.id);
-      if (!entries.length)
-        return json(
-          { error: "Add a journal entry before generating a report." },
-          400,
+    if (path[0] === "reports" && path.length === 2 && method === "DELETE") {
+      const deleted = await (
+        await database()
+      ).transaction(async (q) => {
+        await q(
+          "UPDATE journal_preferences SET revision = revision WHERE user_id = ?",
+          [user.id],
         );
-      const report: Report = {
-        id: randomUUID(),
-        createdAt: new Date().toISOString(),
-        data: analyze(entries),
-        entryCount: entries.length,
-        entries: entries.map(({ embedding, ...rest }) => rest),
-      };
-      await query(
-        "INSERT INTO reports (id, user_id, created_at, data) VALUES (?, ?, ?, ?)",
-        [report.id, user.id, report.createdAt, JSON.stringify(report)],
-      );
-      return json({ report }, 201);
-    }
-    if (route === "companion" && method === "GET")
-      return json({
-        messages: (
-          await query(
-            "SELECT id, role, content, created_at FROM messages WHERE user_id = ? ORDER BY created_at ASC",
-            [user.id],
-          )
-        ).map((r) => ({ ...r, createdAt: r.created_at })),
+        await q(
+          "UPDATE journal_jobs SET status = 'cancelled', active_key = NULL, error = 'Report deleted' WHERE user_id = ? AND result_id = ? AND status IN ('queued','running')",
+          [user.id, path[1]],
+        );
+        return q(
+          "DELETE FROM reports WHERE user_id = ? AND id = ? RETURNING id",
+          [user.id, path[1]],
+        );
       });
-    if (route === "companion" && method === "POST") {
-      const input = await body(req);
-      if (
-        input.consent !== true ||
-        typeof input.question !== "string" ||
-        !input.question.trim() ||
-        input.question.length > 2000
-      )
-        return json(
-          {
-            error:
-              "Enter a question and allow sharing of your question and summary with OpenRouter.",
-          },
-          400,
-        );
-      if (!limit(`ai:${user.id}`, 5))
-        return json(
-          {
-            error:
-              "Please wait a minute before requesting another explanation.",
-          },
-          429,
-        );
-      const response = await explain(
-        input.question.trim(),
-        analyze(await getEntries(user.id)),
+      return json(
+        deleted.length ? { ok: true } : { error: "Report not found." },
+        deleted.length ? 200 : 404,
       );
-      const question = {
-        id: randomUUID(),
-        role: "user",
-        content: input.question.trim(),
-        createdAt: new Date().toISOString(),
-      };
-      const answer = {
-        id: randomUUID(),
-        role: "assistant",
-        content: response,
-        createdAt: new Date(Date.now() + 1).toISOString(),
-      };
-      for (const msg of [question, answer])
-        await query(
-          "INSERT INTO messages (id, user_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-          [msg.id, user.id, msg.role, msg.content, msg.createdAt],
-        );
-      return json({ messages: [question, answer] });
     }
     if (route === "export" && method === "GET") {
       const reports = (
@@ -332,6 +358,21 @@ async function handler(
           ),
           reports,
           messages,
+          journalPreferences: await preferences(user.id),
+          analysisJobs: await query(
+            "SELECT * FROM journal_jobs WHERE user_id = ? ORDER BY created_at ASC",
+            [user.id],
+          ),
+          dailyAnalyses: (
+            await query("SELECT data FROM journal_daily WHERE user_id = ?", [
+              user.id,
+            ])
+          ).map((r) => JSON.parse(String(r.data))),
+          periodAnalyses: (
+            await query("SELECT data FROM journal_periods WHERE user_id = ?", [
+              user.id,
+            ])
+          ).map((r) => JSON.parse(String(r.data))),
         },
         200,
         { "Content-Disposition": 'attachment; filename="still-my-data.json"' },
@@ -355,21 +396,28 @@ async function handler(
       return json({ error: "Invalid JSON." }, 400);
     const message = error instanceof Error ? error.message : "";
     const errors: Record<string, [string, number]> = {
+      CONSENT_REQUIRED: [
+        "Allow journal-content sharing in Settings before analysis.",
+        403,
+      ],
+      INVALID_RANGE: [
+        "Choose a valid past or current range of at most 365 days.",
+        400,
+      ],
+      NOT_FOUND: ["Not found.", 404],
+      USE_REGENERATE: ["Generate a new report revision instead.", 409],
       BODY_TOO_LARGE: ["Request is too large.", 413],
       AI_NOT_CONFIGURED: [
-        "OpenRouter is not connected yet. Add OPENROUTER_API_KEY to the server environment and restart.",
+        "Google Gemini is not connected yet. Add GEMINI_API_KEY to the server environment and restart.",
         503,
       ],
-      FREE_MODEL_REQUIRED: [
-        "Choose openrouter/free or a model ending in :free in the server environment.",
-        503,
-      ],
+      AI_MODEL_INVALID: ["Choose a valid Gemini model in GEMINI_MODEL.", 503],
       AI_RATE_LIMIT: [
         "The free AI provider is busy. Please try again later.",
         429,
       ],
       AI_PROVIDER_ERROR: [
-        "OpenRouter could not return an explanation. Check the server API key and model availability.",
+        "Google Gemini could not return an explanation. Check the server API key and model availability.",
         502,
       ],
     };
@@ -383,7 +431,7 @@ async function handler(
     return json(
       {
         error:
-          "The request could not be completed. Please try again. If local embeddings are enabled, check that the model is prepared.",
+          "The request could not be completed. Please try again or check the server setup. Journal saving does not require an AI model.",
       },
       500,
     );

@@ -2,22 +2,27 @@ export type Metric = "valence" | "stress" | "energy" | "clarity";
 export type Entry = {
   id: string;
   date: string;
-  stress: number;
-  energy: number;
-  clarity: number;
-  valence: number;
-  sleep: number;
-  workload: number;
-  activity: number;
+  stress: number | null;
+  energy: number | null;
+  clarity: number | null;
+  valence: number | null;
+  sleep: number | null;
+  workload: number | null;
+  activity: number | null;
+  social_connection?: number | null;
+  motivation?: number | null;
+  calmness?: number | null;
+  self_compassion?: number | null;
   narrative: string;
   tags: string[];
   createdAt: string;
   embedding?: number[];
   embeddingMethod?: string;
 };
-export type Day = Pick<
-  Entry,
-  "date" | Metric | "sleep" | "workload" | "activity"
+// Legacy self-report report shape; new journal analyses use journal/schema.ts.
+export type Day = { date: string } & Record<
+  Metric | "sleep" | "workload" | "activity",
+  number
 >;
 export type Finding = {
   id: string;

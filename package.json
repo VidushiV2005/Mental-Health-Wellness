@@ -15,7 +15,11 @@
     "format:check": "prettier --check app components lib scripts tests docs README.md next.config.ts package.json tsconfig.json docker-compose.yml",
     "test": "tsx --test tests/*.test.ts",
     "db:check": "tsx scripts/check-db.ts",
-    "embeddings:prepare": "tsx scripts/prepare-embeddings.ts"
+    "ai:check": "tsx scripts/check-ai.ts",
+    "journals:import": "tsx scripts/import-journals.ts",
+    "embeddings:prepare": "tsx scripts/prepare-embeddings.ts",
+    "worker": "tsx scripts/journal-worker.ts",
+    "worker:once": "tsx scripts/journal-worker.ts --once"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.0",

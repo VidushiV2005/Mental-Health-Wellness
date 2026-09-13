@@ -4,6 +4,9 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NextRequest } from "next/server";
+import { query } from "../lib/db";
+import { analyze } from "../lib/analytics";
+import { CONSENT } from "../lib/journal/schema";
 
 process.env.SQLITE_PATH = join(
   mkdtempSync(join(tmpdir(), "wellness-api-test-")),
@@ -11,7 +14,7 @@ process.env.SQLITE_PATH = join(
 );
 delete process.env.DATABASE_URL;
 process.env.EMBEDDING_MODE = "lexical";
-delete process.env.OPENROUTER_API_KEY;
+delete process.env.GEMINI_API_KEY;
 const { GET, POST, PATCH, DELETE } = await import("../app/api/[...path]/route");
 const methods = { GET, POST, PATCH, DELETE };
 async function call(
@@ -110,9 +113,29 @@ test("API lifecycle: secure auth, owner isolation, persistent CRUD, immutable re
     (await call(`entries/${id}`, "DELETE", undefined, second.cookie)).status,
     404,
   );
-  const report = await call("reports", "POST", {}, cookie);
-  assert.equal(report.status, 201);
-  assert.equal(report.body.report.data.averages.valence, 7);
+  const report = await call(
+    "reports",
+    "POST",
+    { start: "2026-01-01", end: "2026-01-01" },
+    cookie,
+  );
+  assert.equal(report.status, 403); // Old aggregate consent never permits journal sharing.
+  const legacy = {
+    id: "legacy-report",
+    createdAt: new Date().toISOString(),
+    data: analyze([created.body.entry]),
+    entries: [created.body.entry],
+    entryCount: 1,
+  };
+  await query(
+    "INSERT INTO reports (id,user_id,created_at,data) VALUES (?,?,?,?)",
+    [
+      legacy.id,
+      registered.body.user.id,
+      legacy.createdAt,
+      JSON.stringify(legacy),
+    ],
+  );
   assert.equal(
     (await call(`entries/${id}`, "PATCH", { ...data, valence: 9 }, cookie))
       .status,
@@ -136,7 +159,7 @@ test("API lifecycle: secure auth, owner isolation, persistent CRUD, immutable re
         cookie,
       )
     ).status,
-    400,
+    410,
   );
   assert.equal(
     (
@@ -147,11 +170,54 @@ test("API lifecycle: secure auth, owner isolation, persistent CRUD, immutable re
         cookie,
       )
     ).status,
-    503,
+    410,
   );
   const exported = await call("export", "GET", undefined, cookie);
   assert.equal(exported.body.entries.length, 1);
   assert.equal(exported.body.reports.length, 1);
+  assert.ok(exported.body.journalPreferences);
+  assert.ok(Array.isArray(exported.body.dailyAnalyses));
+  assert.equal(
+    (
+      await call(
+        "preferences",
+        "PATCH",
+        {
+          timezone: "Asia/Kolkata",
+          consentVersion: CONSENT,
+          autoDaily: false,
+          weekly: true,
+          monthly: true,
+        },
+        cookie,
+      )
+    ).status,
+    200,
+  );
+  const queued = await call(
+    "reports",
+    "POST",
+    { start: "2026-01-01", end: "2026-01-01" },
+    cookie,
+  );
+  assert.equal(queued.status, 202);
+  const duplicate = await call(
+    "reports",
+    "POST",
+    { start: "2026-01-01", end: "2026-01-01" },
+    cookie,
+  );
+  assert.equal(duplicate.body.job.id, queued.body.job.id);
+  assert.equal(
+    (await call(`jobs/${queued.body.job.id}/retry`, "POST", {}, second.cookie))
+      .status,
+    404,
+  );
+  assert.equal(
+    (await call("reports/legacy-report", "DELETE", undefined, second.cookie))
+      .status,
+    404,
+  );
   assert.equal(
     (await call("account", "DELETE", { confirm: "WRONG" }, cookie)).status,
     400,

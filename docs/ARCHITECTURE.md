@@ -1,103 +1,126 @@
-# Mental Health Wellness architecture
+# Journal-first architecture
 
-The AI Mental Health Awareness Companion implements the supplied BTech synopsis: structured reflections, longitudinal statistics, narrative clusters, and user-triggered awareness reports. It does not diagnose conditions or provide treatment. OpenRouter replaces the proposed OpenAI API. The UI product name is Still, with Mental Health Wellness as the repository and project name.
-
-## Design direction
-
-Visual thesis: warm paper surfaces, forest green accents, editorial typography, and a calm workspace organized around the user's actual records.
-
-Content plan: overview with check-in and longitudinal chart; journal with structured and narrative input; patterns with qualified evidence; reports with saved snapshots; companion with optional AI interpretation; account and privacy settings.
-
-Interaction thesis: staggered workspace entrance, deliberate tab/selection feedback, and a paced breathing interaction. Honor reduced motion. Use a quiet forest photograph as secondary atmosphere, not as a barrier to the working surface.
+Still is the interface for Mental Health Wellness. This revision replaces the earlier self-report-statistics/Companion workflow. The supplied journal-first specification takes precedence over earlier synopsis assumptions. OpenRouter is the only active external inference integration.
 
 ## System boundaries
 
 ```mermaid
 flowchart TD
-    UI[Next.js / React workspace] --> API[Node route handlers / validation / session auth]
-    API --> DB[(SQLite locally / PostgreSQL + pgvector)]
-    API --> STATS[Daily aggregation / variation / correlations / drift]
-    API --> EMB[Local MiniLM embeddings or explicit lexical baseline]
-    EMB --> CLUSTER[Cosine similarity clusters / recurring keywords]
-    STATS --> QUAL[Minimum evidence / confidence intervals / qualification]
-    CLUSTER --> QUAL
-    QUAL --> REPORT[Persisted report snapshot]
-    REPORT --> UI
-    QUAL --> AI[OpenRouter explanation on explicit user request]
-    AI --> UI
+    UI[Journal / Overview / Patterns / Reports / Settings] --> API[Next.js API: session, origin and input checks]
+    API --> DB[(SQLite or PostgreSQL)]
+    DB --> W[Independent server worker: schedule and atomic claim]
+    W --> G[Consent + owner + revision + lease guard]
+    G --> D[Every day's chronological text segments]
+    D --> OR[OpenRouter strict JSON: narrative-only scoring]
+    OR --> V[Zod + exact quotes + coverage validation]
+    V --> C[Versioned daily cache]
+    C --> ST[Code: rating fallback, daily metrics, patterns, comparisons]
+    ST --> P[Bounded period synthesis]
+    P --> S[Guarded period cache + immutable report]
+    S --> DB
+    DB --> UI
 ```
 
-## Technology choices
+The browser never gets the provider key and never starts inference during a GET/render. Saving journals does not wait on AI or local embeddings. A separate Node worker executes the pipeline even with every browser closed.
 
-- Next.js App Router, TypeScript, React, Recharts and CSS: frontend and same-origin API in one deployable Node application. Next route handlers replace a redundant standalone Express server.
-- PostgreSQL with pgvector is the deployment database. Docker Compose supplies a local PostgreSQL service. SQLite is an embedded persistent alternative for an immediate college demonstration. No browser localStorage is used for journals.
-- Passwords use scrypt with random salts. Opaque session tokens are SHA-256 hashed in the database; cookies are HttpOnly and SameSite=Lax. Every record query is scoped to its authenticated owner. Mutations check browser origin. Login and AI calls have bounded request rates. Demo mode creates a separate temporary account and clearly marked synthetic records.
-- AI calls use server-side fetch to OpenRouter's chat completions endpoint. The default is `openrouter/free`; free-model availability and rate limits belong to OpenRouter. There is no OpenAI SDK, OpenAI endpoint, or automatic paid-model fallback.
-- Semantic embeddings run locally with `Xenova/all-MiniLM-L6-v2` through Transformers.js, 384 dimensions, mean pooling and L2 normalization. This requires a one-time model download. An explicitly labeled 384-dimensional hashed word/bigram vector baseline is provided for offline setup; its clusters capture lexical similarity, not semantic understanding. Vector methods are never mixed within a report.
+## Source and cache normalization
 
-## Storage
+- Existing date-only strings remain their original calendar dates. A saved IANA timezone (default UTC) controls new-entry dates and schedule boundaries, not retrospective date shifting.
+- A day includes every entry on that date, sorted by date, creation timestamp and ID tie-breaker.
+- Blank-line paragraphs are retained as source units; long paragraphs are split into bounded 3,000-character segments with entry/date/paragraph/segment identifiers. No recent-only slice or silent text truncation is used.
+- Initial text requests contain up to 12,000 serialized characters per batch. All chunk outputs are merged hierarchically. Complete subtree IDs provide verifiable coverage at each level. Period inputs contain every daily summary, final metrics, all validated chunk observations and semantic events, and deterministic pattern statistics.
+- Period atoms are batched at 30,000 characters; merge batches are bounded at 60,000. Oversized/non-reducing output fails explicitly rather than dropping later entries. Provider context/output limits can still prevent a very large history from completing.
+- Daily hashes include the complete ordered input records, timezone and analysis version. Separate form ratings are included in cache invalidation but excluded from narrative scoring requests.
+- Day caches are user/date-scoped and content-hash checked. Edits/moves delete old/new daily caches; all period snapshots become stale through the owner's revision counter. Journal deletion also removes affected live period caches. Immutable successful reports are unchanged.
+- Already-requested pending ranges are requeued at the new revision when a journal changes; old worker tokens are fenced. Permission changes cancel pending jobs instead of silently opting them back in.
 
-`users` owns `sessions`, `entries`, `reports`, and `messages`. Entries store local calendar date, stress, energy, clarity, valence (1–10), sleep hours, workload (1–10), activity minutes, contextual tags, narrative, vector, and embedding method. PostgreSQL uses a native `vector(384)` column; SQLite stores the vector as JSON. Reports persist their analysis and entry snapshot so later journal edits do not silently rewrite a report. Exports return the user's records and reports; account deletion cascades across owned rows.
+## Scoring contract
 
-```mermaid
-erDiagram
-    USERS ||--o{ SESSIONS : authenticates
-    USERS ||--o{ ENTRIES : writes
-    USERS ||--o{ REPORTS : generates
-    USERS ||--o{ MESSAGES : owns
-    USERS {
-        text id PK
-        text email UK
-        text name
-        text password "scrypt hash with salt"
-        integer demo
-        text created_at
-    }
-    SESSIONS {
-        text token PK "SHA-256 digest"
-        text user_id FK
-        text expires_at
-    }
-    ENTRIES {
-        text id PK
-        text user_id FK
-        text date "local calendar day"
-        text data "validated Entry JSON"
-        vector embedding "384 dimensions"
-    }
-    REPORTS {
-        text id PK
-        text user_id FK
-        text created_at
-        text data "immutable Analysis and Entry snapshot JSON"
-    }
-    MESSAGES {
-        text id PK
-        text user_id FK
-        text role
-        text content
-        text created_at
-    }
-```
+All eight dimensions are subjective, unvalidated estimates on a 1–10 scale. Anchors are a rubric, not psychometric calibration:
 
-## Analysis methodology
+| Dimension                | 1                 | 5                           | 10                      |
+| ------------------------ | ----------------- | --------------------------- | ----------------------- |
+| Emotional tone / valence | Very unpleasant   | Explicitly mixed or neutral | Very pleasant           |
+| Stress                   | Little pressure   | Some pressure               | Overwhelming pressure   |
+| Energy                   | Exhausted         | Workable energy             | Highly energized        |
+| Clarity                  | Confused          | Partly clear                | Very clear              |
+| Social connection        | Isolated          | Some connection             | Deeply connected        |
+| Motivation               | Little drive      | Some drive                  | Strong drive            |
+| Calmness                 | Agitated          | Partly settled              | Deeply settled          |
+| Self-compassion          | Harsh toward self | Mixed                       | Deeply kind toward self |
 
-Multiple entries on one date are averaged before time-series analysis so frequent journaling does not overweight a day. Missing dates are not imputed. Means and sample standard deviations describe each metric; volatility uses RMSSD only across consecutive observed calendar days. Seven-day drift compares two complete seven-day windows, requiring at least five observed days in each. Pearson correlations require at least 14 paired days, nonzero variance, absolute r >= 0.4, and a Fisher-z 99% confidence interval excluding zero (a conservative correction for four predeclared comparisons). No causality or calibrated clinical confidence is claimed; serial correlation and self-report bias remain limitations. Narrative groups require at least three entries on three different dates. Cosine thresholds are heuristic and method-specific, not probabilities. The UI exposes withheld evidence and sample sizes.
+The first inference stage cannot see separate numeric form fields. For each day/dimension:
 
-## API surface
+1. Adequate narrative evidence: use the AI estimate, exact evidence and qualitative strength.
+2. Insufficient narrative evidence: use the mean of only explicitly supplied ratings for that day/dimension, if any.
+3. Neither: null.
 
-`POST /api/auth/register`, `/login`, `/demo`, `/logout`; `GET /api/me`; `GET/POST /api/entries`; `PATCH/DELETE /api/entries/:id`; `GET /api/analytics?days=30`; `GET/POST /api/reports`; `GET/POST /api/companion`; `GET /api/export`; `DELETE /api/account`; `GET /api/health`.
+A provider error is not insufficient narrative evidence and never creates an AI-looking fallback analysis. Empty text can be classified as insufficient without a provider call. Original per-entry form values remain in `explicitEntries`; the daily explicit mean remains alongside the AI estimate. A difference of at least three points produces a neutral discrepancy note, not a claim that either value is correct.
 
-AI requests share the user's question plus aggregate statistics and qualified numerical findings. Raw journals and narrative keywords are excluded. Consent is explicit in the companion view; missing configuration and provider failures are surfaced without invented AI output. The assistant is constrained to explain the supplied statistics, distinguish association from causation, avoid diagnosis, and acknowledge insufficient evidence.
+Each result retains value/null, source, scale/direction, strength, explanation, evidence, entry/rating coverage, original explicit mean and discrepancy. Strength means support in the text, not probability. Factual sleep hours/activity minutes come only from explicit numeric form input; no tone-based inference.
 
-## Verification and deployment boundary
+## Aggregation and comparison
 
-Run the calculation/qualification tests and API integration tests, TypeScript checks, and production build. Browser checks cover registration/demo, journal persistence, report generation, account isolation, and responsive navigation. Before internet deployment configure HTTPS, secure cookies, PostgreSQL credentials, protected database backups, and an external rate limiter for multiple replicas. The included in-process rate limiter is suited to a single server. This is an academic awareness application, not a validated clinical device.
+- Day-level overall: arithmetic mean of available dimensions with stress transformed to `11 - stress`, requiring at least four dimensions. Contributors are retained.
+- Period-level overall: take days meeting that threshold, intersect their available dimensions, and require at least four common dimensions. Recompute each eligible day on that fixed set, then average days equally. A changing contributor mix is not silently compared.
+- Overall is labeled unvalidated AI-estimated wellbeing, or self-report fallback wellbeing when no contributor is AI-derived.
+- Per-dimension period summaries average usable observed days; expose AI, fallback, missing and usable day counts. Missing calendar days remain unknown, never zero or neutral.
+- Previous-range comparison uses already-valid daily caches from the immediately preceding equal-length calendar window. It requires at least three eligible days per period and four common dimensions across both sets. It is withheld otherwise; the worker does not secretly analyze an unrequested earlier range.
+- Differing coverage and serial dependence remain limitations. No significance, clinical probability or efficacy claim is made.
 
-## Reference contracts
+## Semantic patterns
 
-- Synopsis.dox.docx, supplied by the user: functional scope and architecture requirements.
-- https://openrouter.ai/docs/quickstart — server API contract.
-- https://openrouter.ai/docs/guides/routing/routers/free-router — free-router model selection.
-- https://github.com/pgvector/pgvector — PostgreSQL vector type.
-- https://huggingface.co/Xenova/all-MiniLM-L6-v2 — local embedding model.
+The model extracts evidence-linked activities, people/explicit roles, stressors, contexts, language/thought patterns, helpful experiences and strengths. It distinguishes experienced, planned, negated, quoted, hypothetical and historical content. Conservative canonical labels plus a small documented alias map group synonyms such as stroll/walking. Generic or ambiguous people are occurrence-scoped, not merged into an invented identity.
+
+Code, not model prose, computes distinct dates, recurrence and comparisons. Single mention means one date, emerging means two, recurring requires three. Multiple same-day mentions never increase day count. All event details/evidence remain available, including differing experiences.
+
+Activity associations compare emotional-tone means on experienced activity-mentioned versus not-mentioned days, requiring three usable dates in **each** group. Non-mention does not mean absence. This is not causation, a mood boost, independent validation or a treatment recommendation; both exposure and estimate may originate from the same text. Before/after interpretations require explicit textual support in the prompt rubric.
+
+## AI validation and limits
+
+`provider.ts` requires a free model name, zero-price routing and structured-output-capable endpoints via `provider.require_parameters`. Every response is Zod-validated. Unknown keys, malformed JSON, incomplete generation, missing model metadata, unsupported metric provenance, missing coverage and inexact source/date/quote references are rejected. Numerical prose is constrained and checked; displayed counts, averages and differences are code-computed. Semantic correctness is still not guaranteed by schema or exact-quote matching.
+
+Journal material is serialized in a separate untrusted user-data message; the system prompt is fixed/versioned. There are no tools. Provider calls have 90-second timeouts and at most three attempts with exponential delay. Unsupported structured routes/authentication errors stop immediately. Consent/ownership/revision/token are checked before every call/retry, after calls and before each write. Model metadata retains requested/returned model, input hash, timestamp and prompt/schema version.
+
+Satori's warm, specific, non-generic and tentative reflection principles are adapted in the prompts. Source references, exact revision, modifications and Apache 2.0 license are retained in the third-party notice. Clinical formulation, hidden personality modeling, trauma/attachment inference and spiritual assumptions are excluded. Immediate-danger output requires evidence and a support message; historical/quoted/negated content is distinguished in instructions. This is not a validated risk detector or a monitored crisis service.
+
+## Storage and migrations
+
+`lib/db.ts` creates additive tables/indexes and records `2026-09-journal-v1` in `schema_migrations`. Existing JSON records are not rewritten. SQLite uses WAL, foreign keys, a busy timeout and serialized transaction access. PostgreSQL uses a checked-out client for transactions.
+
+| Table               | Purpose                                                                       |
+| ------------------- | ----------------------------------------------------------------------------- |
+| users / sessions    | Existing account and hashed session data                                      |
+| entries             | Existing journal JSON; optional numeric fields remain nullable                |
+| messages            | Historical Companion messages, exportable but no active endpoint              |
+| reports             | Immutable new journal-AI or legacy snapshots                                  |
+| journal_preferences | Timezone, versioned consent, separate automatic permissions, revision         |
+| journal_daily       | Latest owner/date cache, hash, complete normalized evidence and metadata      |
+| journal_periods     | Owner/range cache, revision and derived dataset                               |
+| journal_jobs        | Durable status, progress/error, attempts, lease/token, dedupe keys, result ID |
+| journal_worker_lock | Global lease limiting concurrent processing                                   |
+| schema_migrations   | Additive migration version record                                             |
+
+Foreign keys cascade on account deletion. Report deletion removes that snapshot, not independent reports or the journal. Journal deletion retains copies already saved in immutable reports, explicitly disclosed in the UI. Full export includes all jobs (not only the recent UI list), preferences, caches, reports, original entries and historical messages. Backups and third-party retained data need their own retention policy.
+
+## API
+
+| Method / route                               | Behavior                                              |
+| -------------------------------------------- | ----------------------------------------------------- |
+| POST /api/auth/register, login, demo, logout | Existing account/session flow                         |
+| GET /api/me                                  | User, configuration flags and preferences; no API key |
+| GET/POST /api/entries                        | List or atomically save/queue journal                 |
+| PATCH/DELETE /api/entries/:id                | Owner-scoped edit/delete and invalidation             |
+| GET/PATCH /api/preferences                   | Validate timezone and new consent permissions         |
+| GET /api/analytics?start=…&end=…             | Cached status/dataset only                            |
+| POST /api/analysis                           | Queue a selected overview range                       |
+| GET /api/jobs                                | Recent owner-scoped progress                          |
+| POST /api/jobs/:id/retry                     | Retry failed/cancelled authorized work                |
+| GET/POST /api/reports                        | List snapshots / queue a new report revision          |
+| DELETE /api/reports/:id                      | Explicit snapshot deletion and late-write fencing     |
+| /api/companion                               | HTTP 410; no active chatbot                           |
+| GET /api/export                              | Complete owner-scoped export                          |
+| DELETE /api/account                          | Confirmed cascading deletion                          |
+| GET /api/health                              | Database connectivity                                 |
+
+Security retains scrypt passwords, hashed opaque sessions, HttpOnly/SameSite cookies, origin checks and per-process request limiting. Production needs HTTPS, disk/database access protection, shared web rate limiting, review of provider policies and a formal security assessment. PostgreSQL deployment remains unverified locally.

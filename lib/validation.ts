@@ -1,5 +1,5 @@
 import { z } from "zod";
-const metric = z.number().int().min(1).max(10);
+const metric = z.number().int().min(1).max(10).nullable().default(null);
 export const entrySchema = z.object({
   date: z
     .string()
@@ -17,11 +17,15 @@ export const entrySchema = z.object({
   energy: metric,
   clarity: metric,
   valence: metric,
-  sleep: z.number().min(0).max(24),
+  sleep: z.number().min(0).max(24).nullable().default(null),
   workload: metric,
-  activity: z.number().int().min(0).max(1440),
-  narrative: z.string().trim().max(6000),
-  tags: z.array(z.string().trim().min(1).max(30)).max(8),
+  activity: z.number().int().min(0).max(1440).nullable().default(null),
+  social_connection: metric,
+  motivation: metric,
+  calmness: metric,
+  self_compassion: metric,
+  narrative: z.string().trim().max(60000),
+  tags: z.array(z.string().trim().min(1).max(30)).max(8).default([]),
 });
 export const authSchema = z.object({
   email: z
