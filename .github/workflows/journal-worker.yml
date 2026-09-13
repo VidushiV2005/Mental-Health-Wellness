@@ -1,0 +1,51 @@
+name: Journal AI worker
+
+on:
+  schedule:
+    - cron: "3,13,23,33,43,53 * * * *"
+  workflow_dispatch:
+    inputs:
+      synthetic_check:
+        description: "Test invented text only instead of processing journal jobs"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-journal-worker
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    if: github.repository == 'VidushiV2005/Mental-Health-Wellness'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      OPENROUTER_MODEL: openrouter/free
+      GEMINI_MODEL: gemini-3.6-flash
+      NODE_ENV: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Check required configuration
+        run: |
+          test -n "$DATABASE_URL" || { echo 'Missing DATABASE_URL secret'; exit 1; }
+          test -n "$OPENROUTER_API_KEY" || { echo 'Missing OPENROUTER_API_KEY secret'; exit 1; }
+          test -n "$GEMINI_API_KEY" || { echo 'Missing GEMINI_API_KEY secret'; exit 1; }
+      - run: npm ci
+      - name: Synthetic provider check
+        if: inputs.synthetic_check == true
+        run: npm run ai:check
+      - name: Process consented journal jobs
+        if: inputs.synthetic_check != true
+        run: npx --no-install tsx scripts/journal-worker.ts --batch
