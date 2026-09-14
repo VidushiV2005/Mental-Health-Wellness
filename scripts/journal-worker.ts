@@ -39,6 +39,17 @@ do {
         /^[A-Z0-9_]{1,64}$/.test(error.code)
         ? error.code
         : "NO_SAFE_CODE",
+      error instanceof Error
+        ? /endpoint.*(?:not|missing|specif)/i.test(error.message)
+          ? "DATABASE_ENDPOINT_MISSING"
+          : /insecure|sslmode|SSL.*required/i.test(error.message)
+            ? "DATABASE_SSL_REQUIRED"
+            : /password authentication/i.test(error.message)
+              ? "DATABASE_PASSWORD_REJECTED"
+              : /SNI|server.?name/i.test(error.message)
+                ? "DATABASE_SNI_REQUIRED"
+                : "DETAILS_WITHHELD"
+        : "DETAILS_WITHHELD",
     );
     if (once || batch) {
       process.exitCode = 1;
