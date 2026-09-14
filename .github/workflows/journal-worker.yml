@@ -42,7 +42,7 @@ jobs:
           test -n "$DATABASE_URL" || { echo 'Missing DATABASE_URL secret'; exit 1; }
           test -n "$OPENROUTER_API_KEY" || { echo 'Missing OPENROUTER_API_KEY secret'; exit 1; }
           test -n "$GEMINI_API_KEY" || { echo 'Missing GEMINI_API_KEY secret'; exit 1; }
-      - run: npm ci
+      - run: npm ci --include=dev
       - name: Synthetic provider check
         if: inputs.synthetic_check == true
         run: npm run ai:check
