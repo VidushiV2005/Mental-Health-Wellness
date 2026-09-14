@@ -32,6 +32,13 @@ do {
     console.error(
       "Worker iteration failed:",
       error instanceof Error ? error.name : "UnknownError",
+      error &&
+        typeof error === "object" &&
+        "code" in error &&
+        typeof error.code === "string" &&
+        /^[A-Z0-9_]{1,64}$/.test(error.code)
+        ? error.code
+        : "NO_SAFE_CODE",
     );
     if (once || batch) {
       process.exitCode = 1;
